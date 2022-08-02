@@ -48,9 +48,9 @@ public class ImportTableDesc {
   private CreateTableDesc createTblDesc = null;
 
   public ImportTableDesc(String dbName, Table table) throws Exception {
-    if (table.getTableType() == TableType.VIRTUAL_VIEW || table.getTableType() == TableType.MATERIALIZED_VIEW) {
-      throw new IllegalStateException("Trying to import view or materialized view: " + table.getTableName());
-    }
+//    if (table.getTableType() == TableType.VIRTUAL_VIEW || table.getTableType() == TableType.MATERIALIZED_VIEW) {
+//      throw new IllegalStateException("Trying to import view or materialized view: " + table.getTableName());
+//    }
 
     this.dbName = dbName;
     TableName tableName = HiveTableName.ofNullable(table.getTableName(), dbName);

@@ -80,6 +80,8 @@ public class CreateMaterializedViewDesc implements DDLDesc, Serializable {
   // This is not needed beyond compilation, so it is transient.
   private transient FileSinkDesc writer;
   private String ownerName = null;
+  private boolean forReplication = false;
+  private String tblWriteIdStrList = null;
 
   /**
    * Used to create a materialized view descriptor.
@@ -415,4 +417,16 @@ public class CreateMaterializedViewDesc implements DDLDesc, Serializable {
     return this.ownerName;
   }
 
+  public boolean getForReplication(){
+    return this.forReplication;
+  }
+  public String getTblWriteIdStrList(){
+    return this.tblWriteIdStrList;
+  }
+  public void setForReplication(boolean forReplication){
+    this.forReplication = forReplication;
+  }
+  public void setTblWriteIdStrList(String tblWriteIdStrList){
+    this.tblWriteIdStrList = tblWriteIdStrList;
+  }
 }

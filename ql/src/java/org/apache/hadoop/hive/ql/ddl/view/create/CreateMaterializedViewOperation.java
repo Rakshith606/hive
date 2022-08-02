@@ -69,12 +69,20 @@ public class CreateMaterializedViewOperation extends DDLOperation<CreateMaterial
         for (TableName tableName : desc.getTablesUsed()) {
           sourceTables.add(context.getDb().getTable(tableName).createSourceTable());
         }
+        String tblWriteIdStrList;
+        if(desc.getForReplication()){
+          tblWriteIdStrList = desc.getTblWriteIdStrList();
+        }
+        else{
+          tblWriteIdStrList = context.getConf().get(ValidTxnWriteIdList.VALID_TABLES_WRITEIDS_KEY);
+        }
+
         MaterializedViewMetadata metadata = new MaterializedViewMetadata(
                 MetaStoreUtils.getDefaultCatalog(context.getConf()),
                 tbl.getDbName(),
                 tbl.getTableName(),
                 sourceTables,
-                context.getConf().get(ValidTxnWriteIdList.VALID_TABLES_WRITEIDS_KEY));
+                tblWriteIdStrList);
         tbl.setMaterializedViewMetadata(metadata);
       }
       context.getDb().createTable(tbl, desc.getIfNotExists());

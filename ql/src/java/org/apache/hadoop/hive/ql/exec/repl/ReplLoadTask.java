@@ -18,6 +18,7 @@
 package org.apache.hadoop.hive.ql.exec.repl;
 
 import org.apache.hadoop.hive.common.ValidTxnList;
+import org.apache.hadoop.hive.common.ValidTxnWriteIdList;
 import org.apache.hadoop.hive.common.repl.ReplConst;
 import org.apache.hadoop.fs.Options;
 import org.apache.hadoop.hive.metastore.ReplChangeManager;
@@ -26,9 +27,14 @@ import org.apache.hadoop.hive.metastore.api.TxnType;
 import org.apache.hadoop.hive.metastore.utils.MetaStoreUtils;
 import org.apache.hadoop.hive.ql.ddl.database.alter.owner.AlterDatabaseSetOwnerDesc;
 import org.apache.hadoop.hive.ql.ddl.privilege.PrincipalDesc;
+import org.apache.hadoop.hive.ql.ddl.view.create.CreateMaterializedViewDesc;
+import org.apache.hadoop.hive.ql.ddl.view.materialized.update.MaterializedViewUpdateDesc;
+import org.apache.hadoop.hive.ql.exec.repl.bootstrap.events.*;
 import org.apache.hadoop.hive.ql.exec.repl.util.SnapshotUtils;
 import org.apache.hadoop.hive.ql.lockmgr.HiveTxnManager;
 import org.apache.hadoop.hive.ql.parse.repl.load.log.IncrementalLoadLogger;
+import org.apache.hadoop.hive.ql.plan.ReplTxnWork;
+import org.apache.hadoop.hive.ql.session.SessionState;
 import org.apache.thrift.TException;
 import com.google.common.collect.Collections2;
 import org.apache.commons.lang3.StringUtils;
@@ -46,11 +52,6 @@ import org.apache.hadoop.hive.ql.ddl.database.alter.poperties.AlterDatabaseSetPr
 import org.apache.hadoop.hive.ql.ddl.view.create.CreateViewDesc;
 import org.apache.hadoop.hive.ql.exec.Task;
 import org.apache.hadoop.hive.ql.exec.TaskFactory;
-import org.apache.hadoop.hive.ql.exec.repl.bootstrap.events.BootstrapEvent;
-import org.apache.hadoop.hive.ql.exec.repl.bootstrap.events.ConstraintEvent;
-import org.apache.hadoop.hive.ql.exec.repl.bootstrap.events.DatabaseEvent;
-import org.apache.hadoop.hive.ql.exec.repl.bootstrap.events.FunctionEvent;
-import org.apache.hadoop.hive.ql.exec.repl.bootstrap.events.PartitionEvent;
 import org.apache.hadoop.hive.ql.exec.repl.bootstrap.events.filesystem.BootstrapEventsIterator;
 import org.apache.hadoop.hive.ql.exec.repl.bootstrap.events.filesystem.ConstraintEventsIterator;
 import org.apache.hadoop.hive.ql.exec.repl.bootstrap.events.filesystem.FSTableEvent;
@@ -85,16 +86,8 @@ import org.apache.hadoop.mapreduce.JobContext;
 import java.io.FileNotFoundException;
 import java.io.IOException;
 import java.io.Serializable;
-import java.util.ArrayList;
-import java.util.Collections;
-import java.util.HashMap;
-import java.util.HashSet;
-import java.util.LinkedHashMap;
-import java.util.List;
-import java.util.Map;
-import java.util.LinkedList;
-import java.util.Arrays;
-import java.util.Set;
+import java.util.*;
+import java.util.stream.Collectors;
 
 import static org.apache.hadoop.hive.conf.HiveConf.ConfVars.REPL_DUMP_SKIP_IMMUTABLE_DATA_COPY;
 import static org.apache.hadoop.hive.conf.HiveConf.ConfVars.REPL_SNAPSHOT_DIFF_FOR_EXTERNAL_TABLE_COPY;
@@ -114,6 +107,7 @@ public class ReplLoadTask extends Task<ReplLoadWork> implements Serializable {
   private final static int ZERO_TASKS = 0;
   private final String STAGE_NAME = "REPL_LOAD";
   private List<TxnType> excludedTxns = Arrays.asList(TxnType.READ_ONLY, TxnType.REPL_CREATED);
+  protected static SessionState.LogHelper console= new SessionState.LogHelper(LOG);
 
   @Override
   public String getName() {
@@ -316,6 +310,13 @@ public class ReplLoadTask extends Task<ReplLoadWork> implements Serializable {
           tableTracker = new TaskTracker(1);
           tableTracker.addTask(createViewTask(tableEvent.getMetaData(), work.dbNameToLoadIn, conf,
                   (new Path(work.dumpDirectory).getParent()).toString(), work.getMetricCollector()));
+        } else if (TableType.MATERIALIZED_VIEW.name().equals(tableEvent.getMetaData().getTable().getTableType())) {
+          tableTracker = new TaskTracker(1);
+//          tableTracker.addTask(createMaterializedViewTask(tableEvent.getMetaData(), work.dbNameToLoadIn, conf, //only DDL does not load data
+//                  (new Path(work.dumpDirectory).getParent()).toString(), work.getMetricCollector(),tableEvent,loadContext));
+          LoadTable loadTable = new LoadTable(tableEvent, loadContext, iterator.replLogger(), tableContext,
+                  loadTaskTracker, work.getMetricCollector());
+          tableTracker = loadTable.tasks(work.isIncrementalLoad(), work.isSecondFailover);
         } else {
           LoadTable loadTable = new LoadTable(tableEvent, loadContext, iterator.replLogger(), tableContext,
               loadTaskTracker, work.getMetricCollector());
@@ -517,7 +518,68 @@ public class ReplLoadTask extends Task<ReplLoadWork> implements Serializable {
     return TaskFactory.get(new DDLWork(new HashSet<>(), new HashSet<>(), desc, true,
             dumpDirectory, metricCollector), conf);
   }
+  public static Task<?> createMaterializedViewTask(MetaData metaData, String dbNameToLoadIn, HiveConf conf,
+                                                   String dumpDirectory, ReplicationMetricCollector metricCollector, TableEvent tableEvent, Context loadContext)
+          throws SemanticException {
 
+    Table table = new Table(metaData.getTable());
+    String dbName = dbNameToLoadIn == null ? table.getDbName() : dbNameToLoadIn;
+    TableName tableName = HiveTableName.ofNullable(table.getTableName(), dbName);
+    String dbDotView = tableName.getNotEmptyDbTable();
+    String viewOriginalText = table.getViewOriginalText();
+    String viewExpandedText = table.getViewExpandedText();
+    if (!dbName.equals(table.getDbName())) {
+      // TODO: If the DB name doesn't match with the metadata from dump, then need to rewrite the original and expanded
+      // texts using new DB name. Currently it refers to the source database name.
+    }
+    table.getParameters().put("materializedview.engine","mr");
+//    console.printInfo("tableParams "+table.getParameters().toString());
+//    console.printInfo("replicationSpec().getValidTxnList() "+tableEvent.replicationSpec().getValidTxnList());
+//    console.printInfo("replicationSpec().getValidWriteIdList() "+tableEvent.replicationSpec().getValidWriteIdList());
+
+//    ReplTxnWork replTxnWork = new ReplTxnWork(dbName, tableName.getTable(), null,
+//            tableEvent.replicationSpec().getValidWriteIdList(), ReplTxnWork.OperationType.REPL_WRITEID_STATE,
+//            (new Path(loadContext.dumpDirectory)).getParent().toString(), metricCollector);
+//
+//    Task<?> replTxnTask = TaskFactory.get(replTxnWork, loadContext.hiveConf);
+    CreateMaterializedViewDesc desc = new CreateMaterializedViewDesc(dbDotView, table.getCols(), null, table.getParameters(),
+            table.getPartColNames(), null, null, false,table.isRewriteEnabled(),
+            table.getSd().getInputFormat(),
+            table.getSd().getOutputFormat(),
+            null,
+            table.getSd().getSerdeInfo().getSerializationLib(),
+            null,
+            table.getSd().getSerdeInfo().getParameters());
+    desc.setViewOriginalText(viewOriginalText);
+    desc.setViewExpandedText(viewExpandedText);
+    desc.setPartCols(table.getPartCols());
+    desc.setOwnerName(table.getOwner());
+    desc.setTablesUsed(table.getMVMetadata().getSourceTableNames());
+//    console.printInfo(String.format("table.getMVMetadata().getValidTxnList() : %s",table.getMVMetadata().getValidTxnList()));
+//    console.printInfo(String.format("TxnId in ReplLoadTask: %d",loadContext.nestedContext.getHiveTxnManager().getCurrentTxnId()));
+//    ValidTxnWriteIdList validTxnList = new ValidTxnWriteIdList(table.getMVMetadata().getValidTxnList());
+
+//    String tblWriteIdStrList = table.getMVMetadata().getSourceTableNames().stream().map(tabName-> validTxnList.getTableValidWriteIdList(tabName.getNotEmptyDbTable()).toString()).collect(Collectors.joining());
+    String[] tblWriteId = table.getMVMetadata().getValidTxnList().split("\\$");
+    tblWriteId[0]=String.valueOf(loadContext.nestedContext.getHiveTxnManager().getCurrentTxnId());
+    String tblWriteIdStrList = String.join("$",tblWriteId);
+    desc.setForReplication(true);
+    desc.setTblWriteIdStrList(tblWriteIdStrList);
+//    tblWriteIdStrList=loadContext.nestedContext.getHiveTxnManager().getCurrentTxnId()+"$"+tblWriteIdStrList;
+
+    Task<?> task = TaskFactory.get(new DDLWork(new HashSet<>(), new HashSet<>(), desc, true,
+            dumpDirectory, metricCollector), conf);
+//    ReplTxnWork replTxnWork = new ReplTxnWork(dbName, tableName.getTable(), null,
+//            tableEvent.replicationSpec().getValidWriteIdList(), ReplTxnWork.OperationType.REPL_WRITEID_STATE,
+//            (new Path(loadContext.dumpDirectory)).getParent().toString(), metricCollector);
+
+//    Task<?> replTxnTask = TaskFactory.get(replTxnWork, loadContext.hiveConf);
+
+//    replTxnTask.addDependentTask(task);
+//    task.addDependentTask(replTxnTask);
+    return task;
+//    return replTxnTask;
+  }
   /**
    * If replication policy is changed between previous and current load, then the excluded tables in
    * the new replication policy will be dropped.

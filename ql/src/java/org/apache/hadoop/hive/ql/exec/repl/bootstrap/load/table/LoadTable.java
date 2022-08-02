@@ -18,6 +18,7 @@
 package org.apache.hadoop.hive.ql.exec.repl.bootstrap.load.table;
 
 import org.apache.hadoop.fs.Path;
+import org.apache.hadoop.hive.common.ValidTxnWriteIdList;
 import org.apache.hadoop.hive.conf.HiveConf;
 import org.apache.hadoop.hive.metastore.TableType;
 import org.apache.hadoop.hive.metastore.Warehouse;
@@ -32,6 +33,8 @@ import org.apache.hadoop.hive.ql.exec.Task;
 import org.apache.hadoop.hive.ql.exec.TaskFactory;
 import org.apache.hadoop.hive.ql.exec.Utilities;
 import org.apache.hadoop.hive.ql.exec.repl.ReplExternalTables;
+import org.apache.hadoop.hive.ql.exec.repl.ReplLoadTask;
+import org.apache.hadoop.hive.ql.exec.repl.bootstrap.events.filesystem.FSTableEvent;
 import org.apache.hadoop.hive.ql.exec.repl.util.ReplUtils;
 import org.apache.hadoop.hive.ql.exec.repl.util.ReplUtils.ReplLoadOpType;
 import org.apache.hadoop.hive.ql.exec.repl.bootstrap.events.TableEvent;
@@ -195,9 +198,15 @@ public class LoadTable {
     if (!tblDesc.isExternal() && !setLoc) {
       tblDesc.setLocation(null);
     }
-    Task<?> createTableTask =
-        tblDesc.getCreateTableTask(new HashSet<>(), new HashSet<>(), context.hiveConf, true,
+    Task<?> createTableTask;
+
+    FSTableEvent fsTableEvent = (FSTableEvent)event;
+    if(TableType.MATERIALIZED_VIEW.name().equals(fsTableEvent.getMetaData().getTable().getTableType()))
+      createTableTask = ReplLoadTask.createMaterializedViewTask(fsTableEvent.getMetaData(),fsTableEvent.getDbName(),context.hiveConf,context.dumpDirectory,metricCollector,event,context);
+    else
+      createTableTask = tblDesc.getCreateTableTask(new HashSet<>(), new HashSet<>(), context.hiveConf, true,
                 (new Path(context.dumpDirectory)).getParent().toString(), metricCollector, true);
+
     if (tblRootTask == null) {
       tblRootTask = createTableTask;
     } else {
